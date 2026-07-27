@@ -192,6 +192,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MadsMainCruiseAllowed", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"MadsSteeringMode", {PERSISTENT | BACKUP, INT, "0"}},
     {"MadsUnifiedEngagementMode", {PERSISTENT | BACKUP, BOOL, "1"}},
+    {"MadsMinEngageSpeed", {PERSISTENT | BACKUP, INT, "5"}},  // always stored in mph; 0 = disabled
 
     // Model Manager params
     {"ModelManager_ActiveBundle", {PERSISTENT, JSON}},
@@ -221,6 +222,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // sunnypilot car specific params
     {"HyundaiLongitudinalTuning", {PERSISTENT | BACKUP, INT, "0"}},
+    {"RivianAggressiveTune", {PERSISTENT | BACKUP, INT, "0"}},  // 0=auto (Gen1 R1T->aggressive, else tame), 1=force tame
     {"SubaruStopAndGo", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"SubaruStopAndGoManualParkingBrake", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"TeslaCoopSteering", {PERSISTENT | BACKUP, BOOL, "0"}},
@@ -268,6 +270,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // Rivian
     {"RivianResumeEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"RivianMadsSteeringModeDefaulted", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"RivianAnglePrimary", {PERSISTENT | BACKUP, BOOL, "1"}},  // 1 = angle primary (hands-off derived angle); 0 = torque primary (torque-only LKA)
+    {"RivianForceTorqueSteerReq", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL, "0"}},  // UI wheel-tap edge -> carcontroller
+    {"RivianAngleSteerPhase", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, INT, "0"}},  // carcontroller hold-to-confirm phase -> selfdrived
 
     // Smart Cruise Control
     {"MapTargetVelocities", {CLEAR_ON_ONROAD_TRANSITION, STRING}},

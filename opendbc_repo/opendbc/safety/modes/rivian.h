@@ -85,7 +85,14 @@ static void rivian_rx_hook(const CANPacket_t *msg) {
       // UP_1 (value 1) is the MADS toggle gesture. Drive mads_button_press so
       // the panda MADS state machine can grant controls_allowed_lateral for Mode B
       // without requiring ACC to be active.
-      mads_button_press = (user_adas_request == 1U) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+      // Only count it when stock ACC is NOT engaged: with ACC active python treats UP_1
+      // as cancel-only (no MADS toggle), so counting it here desyncs the two MADS state
+      // machines (panda-ON/python-OFF), and once the heartbeat-mismatch exit fires, the
+      // next real engage can be revoked mid-stream — the rejected 0x110 frames put
+      // counter gaps on the bus and the EPAS faults with AngleControlCntr (route
+      // c17ea97dc5472650/00000006 seg 3). While ACC is engaged, lateral is already
+      // granted via op_controls_allowed, so no capability is lost.
+      mads_button_press = ((user_adas_request == 1U) && !cruise_engaged_prev) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
 
       // UP_2 (value 2, past detent): do not force-disengage here. Python suppresses
       // pcmEnable via altButton2 to prevent unintended MADS engagement from disengaged.
@@ -99,6 +106,14 @@ static void rivian_rx_hook(const CANPacket_t *msg) {
     if (msg->addr == 0x380U) {
       int torque_driver_new = (((msg->data[2] << 4) | (msg->data[3] >> 4))) - 2050U;
       update_sample(&torque_driver, torque_driver_new);
+    }
+
+    // Measured steering angle from EPAS (EPAS_AdasStatus)
+    if (msg->addr == 0x390U) {
+      // EPAS_InternalSas: 47|14@0+ (0.1,-819.2) deg
+      // Stored as degrees * 10 to match angle_deg_to_can
+      int angle_meas_new = ((msg->data[5] << 6) | (msg->data[6] >> 2)) - 8192U;
+      update_sample(&angle_meas, angle_meas_new);
     }
 
     // Brake pressed
@@ -121,6 +136,18 @@ static void rivian_rx_hook(const CANPacket_t *msg) {
 }
 
 static bool rivian_tx_hook(const CANPacket_t *msg) {
+  const AngleSteeringLimits RIVIAN_ANGLE_STEERING_LIMITS = {
+    .max_angle = 5000,  // 500 deg
+    .angle_deg_to_can = 10,
+    .frequency = 100U,
+  };
+
+  const AngleSteeringParams RIVIAN_ANGLE_STEERING_PARAMS = {
+    .slip_factor = -0.0005445721739802007,
+    .steer_ratio = 15.2,
+    .wheelbase = 3.08,
+  };
+
   const TorqueSteeringLimits RIVIAN_STEERING_LIMITS = {
     .max_torque = 385,
     .dynamic_max_torque = true,
@@ -153,7 +180,17 @@ static bool rivian_tx_hook(const CANPacket_t *msg) {
   bool tx = true;
 
   if (msg->bus == 0U) {
-    // Steering control
+    // Angle steering control
+    if (msg->addr == 0x110U) {
+      int desired_angle = ((msg->data[2] << 7) | (msg->data[3] >> 1)) - 16384U;
+      bool lka_active = GET_BIT(msg, 12U);
+
+      if (steer_angle_cmd_checks_vm(desired_angle, lka_active, RIVIAN_ANGLE_STEERING_LIMITS, RIVIAN_ANGLE_STEERING_PARAMS)) {
+        tx = false;
+      }
+    }
+
+    // Torque steering control (cooperative override)
     if (msg->addr == 0x120U) {
       int desired_torque = ((msg->data[2] << 3U) | (msg->data[3] >> 5U)) - 1024U;
       bool steer_req = (msg->data[3] >> 4) & 1U;
@@ -178,24 +215,25 @@ static bool rivian_tx_hook(const CANPacket_t *msg) {
 static safety_config rivian_init(uint16_t param) {
   // SCCM_WheelTouch: for hiding hold wheel alert
   // VDM_AdasSts: for canceling stock ACC
-  // 0x120 = ACM_lkaHbaCmd, 0x321 = SCCM_WheelTouch, 0x162 = VDM_AdasSts
-  static const CanMsg RIVIAN_TX_MSGS[] = {{0x120, 0, 8, .check_relay = true}, {0x321, 2, 7, .check_relay = true}, {0x162, 2, 8, .check_relay = true}};
+  // 0x100 = ACM_Status, 0x110 = ACM_SteeringControl, 0x120 = ACM_lkaHbaCmd, 0x321 = SCCM_WheelTouch, 0x162 = VDM_AdasSts
+  static const CanMsg RIVIAN_TX_MSGS[] = {{0x100, 0, 8, .check_relay = true}, {0x110, 0, 8, .check_relay = true}, {0x120, 0, 8, .check_relay = true}, {0x321, 2, 7, .check_relay = true}, {0x162, 2, 8, .check_relay = true}};
   // 0x160 = ACM_longitudinalRequest
-  static const CanMsg RIVIAN_LONG_TX_MSGS[] = {{0x120, 0, 8, .check_relay = true}, {0x321, 2, 7, .check_relay = true}, {0x160, 0, 5, .check_relay = true}};
+  static const CanMsg RIVIAN_LONG_TX_MSGS[] = {{0x100, 0, 8, .check_relay = true}, {0x110, 0, 8, .check_relay = true}, {0x120, 0, 8, .check_relay = true}, {0x321, 2, 7, .check_relay = true}, {0x160, 0, 5, .check_relay = true}};
 
   static RxCheck rivian_rx_checks[] = {
-    {.msg = {{0x208, 0, 8, 50U, .max_counter = 14U}, { 0 }, { 0 }}},                                                              // ESP_Status (speed)
-    {.msg = {{0x150, 0, 7, 50U, .max_counter = 14U}, { 0 }, { 0 }}},                                                              // VDM_PropStatus (gas pedal & 2nd speed)
-    {.msg = {{0x162, 0, 8, 50U, .max_counter = 14U, .ignore_quality_flag = true}, { 0 }, { 0 }}},                                 // VDM_AdasSts (stalk requests)
-    {.msg = {{0x380, 0, 5, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // EPAS_SystemStatus (driver torque)
-    {.msg = {{0x38f, 0, 6, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},    // iBESP2 (brakes)
-    {.msg = {{0x100, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // ACM_Status (cruise state)
+    {.msg = {{0x208, 0, 8, 50U, .max_counter = 14U}, { 0 }, { 0 }}},                                                             // ESP_Status (speed)
+    {.msg = {{0x150, 0, 7, 50U, .max_counter = 14U}, { 0 }, { 0 }}},                                                             // VDM_PropStatus (gas pedal & 2nd speed)
+    {.msg = {{0x380, 0, 5, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  // EPAS_SystemStatus (driver torque)
+    {.msg = {{0x390, 0, 7, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  // EPAS_AdasStatus (measured angle)
+    {.msg = {{0x38f, 0, 6, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // iBESP2 (brakes)
+    {.msg = {{0x100, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},  // ACM_Status (cruise state)
+    {.msg = {{0x162, 0, 8, 50U, .max_counter = 14U, .ignore_quality_flag = true}, { 0 }, { 0 }}},                                // VDM_AdasSts (stalk requests)
   };
 
   bool rivian_longitudinal = false;
-  rivian_prev_user_adas_request = 0U;
 
   SAFETY_UNUSED(param);
+  rivian_prev_user_adas_request = 0U;
   #ifdef ALLOW_DEBUG
     const int FLAG_RIVIAN_LONG_CONTROL = 1;
     rivian_longitudinal = GET_FLAG(param, FLAG_RIVIAN_LONG_CONTROL);

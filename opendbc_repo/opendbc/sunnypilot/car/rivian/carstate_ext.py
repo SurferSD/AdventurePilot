@@ -8,8 +8,6 @@ import math
 from enum import StrEnum
 
 from opendbc.car import Bus, structs
-from openpilot.common.params import Params
-from openpilot.sunnypilot.mads.helpers import MadsSteeringModeOnBrake, read_steering_mode_param
 from opendbc.can.parser import CANParser
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.rivian.values import DBC
@@ -34,7 +32,14 @@ class CarStateExt:
     self.decrease_counter = 0
     self.vdm_user_adas_request = 0
     self._lkas_pending = False
-    self.steering_mode_on_brake = read_steering_mode_param(CP, CP_SP, Params())
+    # lazy openpilot imports: opendbc must stay importable standalone (safety test suite)
+    from openpilot.common.params import Params
+    from openpilot.sunnypilot.mads.helpers import MadsSteeringModeOnBrake, read_steering_mode_param
+    params = Params()
+    if not params.get_bool("RivianMadsSteeringModeDefaulted"):
+      params.put("MadsSteeringMode", MadsSteeringModeOnBrake.DISENGAGE, block=True)
+      params.put_bool("RivianMadsSteeringModeDefaulted", True, block=True)
+    self.steering_mode_on_brake = read_steering_mode_param(CP, CP_SP, params)
 
     self._resume_enabled: bool = Params().get_bool("RivianResumeEnabled")
     self.last_active_set_speed: float | None = None
@@ -63,6 +68,7 @@ class CarStateExt:
     # In DISENGAGE mode with ACC active, suppress: UP_1 cancels Rivian ACC natively
     # and pcmDisable is stripped by mads.update_events(), leaving MADS in Mode B.
     # Generating lkas here would also fire manualSteeringRequired and kill MADS.
+    from openpilot.sunnypilot.mads.helpers import MadsSteeringModeOnBrake
     if vdm == 1 and self.vdm_user_adas_request not in (1, 2):
       if not (self.steering_mode_on_brake == MadsSteeringModeOnBrake.DISENGAGE and ret.cruiseState.enabled):
         self._lkas_pending = True
@@ -168,6 +174,9 @@ class CarStateExt:
 
       if self._resume_acc_counter == 50 and self.last_active_set_speed is not None:
         self.set_speed = self.last_active_set_speed
+        # Forget the remembered speed so a later DOWN_2 hold in the same ACC session cannot
+        # re-resume to a stale value; only a fresh ACC deactivation re-stashes a set speed.
+        self.last_active_set_speed = None
         self._resume_eligible = False
         self._resume_acc_counter = 0
 

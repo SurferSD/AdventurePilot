@@ -22,10 +22,23 @@ class CarInterface(CarInterfaceBase):
     if 0x321 not in fingerprint[0]:
       ret.flags |= RivianFlags.GEN2.value
 
+    # this branch requires the xnor extreme angle harness (announces 0x1310 on bus 1)
+    if 0x1310 in fingerprint[1]:
+      ret.flags |= RivianFlags.ANGLE_HARNESS.value
+    else:
+      ret.dashcamOnly = True
+
     ret.steerActuatorDelay = 0.15
+    # angle control can hold the wheel at standstill; lateral is gated to drive gear in mads.py
+    ret.steerAtStandstill = True
+    # speed-scheduled lateral curvature low-pass (delay-compensated in modeld); damps the
+    # angle plant's crawl-speed limit cycle, off by 8 m/s
+    ret.lateralSmoothSeconds = 0.4
     ret.steerLimitTimer = 0.4
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
+    # torque is the primary channel (xnor inversion): ext_controller derives the angle
+    # from curvature and cooperative torque covers override/handoff
     ret.steerControlType = structs.CarParams.SteerControlType.torque
     ret.radarUnavailable = True
 
@@ -35,12 +48,18 @@ class CarInterface(CarInterfaceBase):
       ret.openpilotLongitudinalControl = True
       ret.safetyConfigs[0].safetyParam |= RivianSafetyFlags.LONG_CONTROL.value
 
-    # Measured command->aEgo lag ~0.25s (route 00000028, xcorr); was 0.1 = under-modeled, so the
-    # planner under-anticipates the VDM. 0.2 tightens anticipation (smoother) while staying well under
-    # xnor's conservative 0.5 to keep AP's responsive feel. Fall back to 0.15 if it feels laggy on lead-brake.
-    ret.longitudinalActuatorDelay = 0.2
+    # Measured command->aEgo lag = 0.26-0.38 s (xcorr across routes c17ea97d 0000000b/00000002, corr 0.98;
+    # tools plant_tracking.py). 0.2 was UNDER the plant delay, so the planner under-anticipated the VDM ->
+    # commands land ~0.1 s late, which reads as "slow to react" on lead-brake and sluggish on resume. Set to
+    # 0.3 to match the measured lag so the command leads the plant correctly. Drop toward 0.25 if it overshoots.
+    ret.longitudinalActuatorDelay = 0.3
     ret.vEgoStopping = 0.25
     ret.stopAccel = -0.2
+    # kp intentionally left at default (0): a proportional term on (a_target - aEgo) amplifies the noisy
+    # low-speed aEgo (d/dt of wheel-speed vEgo) into a ~12 Hz command dither ("stutter"), and it only
+    # marginally corrected the VDM's decel bias anyway. That bias is now cancelled deterministically by a
+    # speed-scheduled feedforward at the actuator (see CarControllerParams.ACCEL_FF_DRAG_* / carcontroller).
+    # ki=0.2 still cleans up any steady-state residual, noise-free.
     ret.longitudinalTuning.kiBP = [0.]
     ret.longitudinalTuning.kiV = [0.2]
 
