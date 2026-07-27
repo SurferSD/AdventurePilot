@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-BRANCH="${BRANCH:-ap-dev-prebuilt}"
+BRANCH="${BRANCH:-ap-dev-advanced}"
 REMOTE_URL="${REMOTE_URL:-git@github.com:SurferSD/AdventurePilot.git}"
 OPENPILOT_DIR="${OPENPILOT_DIR:-/data/openpilot}"
 
